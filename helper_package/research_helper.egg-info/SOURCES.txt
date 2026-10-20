@@ -1,5 +1,0 @@
-pyproject.toml
-research_helper.egg-info/PKG-INFO
-research_helper.egg-info/SOURCES.txt
-research_helper.egg-info/dependency_links.txt
-research_helper.egg-info/top_level.txt
