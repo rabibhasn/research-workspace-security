@@ -77,11 +77,11 @@ def create_record():
     record_id = str(uuid.uuid4())
 
     record = {
-        "id": record_id,
-        "owner_id": context["user_id"],
-        "title": title.strip(),
-        "content": content.strip(),
-    }
+    "id": record_id,
+    "owner_id": data.get("owner_id", context["user_id"]),
+    "title": title.strip(),
+    "content": content.strip(),
+}
 
     records[record_id] = record
 
@@ -121,11 +121,11 @@ def get_record(record_id):
         return jsonify({"error": "Invalid user context"}), 401
 
     record = records.get(record_id)
-
-    # Return the same response for missing and non-owned records.
-    if record is None or record["owner_id"] != context["user_id"]:
+    if record is None:
         return jsonify({"error": "Record not found"}), 404
 
+    # INTENTIONAL VULNERABILITY:
+    # The service does not check whether the requesting user owns the record.
     return jsonify({"record": record}), 200
 
 
