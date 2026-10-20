@@ -4,6 +4,8 @@ pipeline {
 
     environment {
         PYTHON = 'C:\\Users\\rabib\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe'
+        VENV = '.venv-ci'
+        REPORT_DIR = 'reports'
     }
 
     stages {
@@ -13,35 +15,37 @@ pipeline {
             }
         }
 
-        stage('Check Python') {
+        stage('Create Fresh Environment') {
             steps {
-                bat '"%PYTHON%" --version'
-                bat '"%PYTHON%" -c "import sys; print(sys.executable)"'
+                bat 'if exist "%VENV%" rmdir /s /q "%VENV%"'
+                bat '"%PYTHON%" -m venv "%VENV%"'
+                bat '"%VENV%\\Scripts\\python.exe" --version'
+                bat '"%VENV%\\Scripts\\python.exe" -m pip install --upgrade pip'
             }
         }
 
         stage('Install Dependencies') {
             steps {
-                bat '"%PYTHON%" -m pip install -r requirements.txt'
-                bat '"%PYTHON%" -m pip install -e helper_package'
-                bat '"%PYTHON%" -m pip install pytest bandit'
+                bat '"%VENV%\\Scripts\\python.exe" -m pip install -r requirements.txt'
+                bat '"%VENV%\\Scripts\\python.exe" -m pip install -e helper_package'
             }
         }
 
-        
-        
         stage('Bandit Security Scan') {
             steps {
-                script {
-                    bat 'if not exist reports mkdir reports'
+                bat 'if not exist "%REPORT_DIR%" mkdir "%REPORT_DIR%"'
 
+                script {
                     def banditStatus = bat(
                         returnStatus: true,
-                        script: '"%PYTHON%" -m bandit -r api_service resource_service processing_service helper_package/research_helper -f json -o reports/bandit-report.json'
+                        script: '"%VENV%\\Scripts\\python.exe" -m bandit -r api_service resource_service processing_service helper_package\\research_helper -f json -o reports\\bandit-report.json'
                     )
 
                     echo "Bandit exit code: ${banditStatus}"
-                    echo "Report generated for review; security gate is not enabled yet."
+
+                    if (banditStatus > 1) {
+                        error('Bandit could not complete the scan. Check the console log.')
+                    }
                 }
             }
             post {
@@ -54,12 +58,23 @@ pipeline {
             }
         }
 
-
-
         stage('Run Tests') {
             steps {
-                bat '"%PYTHON%" -m pytest -v'
+                bat '"%VENV%\\Scripts\\python.exe" -m pytest -v'
             }
+        }
+    }
+
+    post {
+        always {
+            junit(
+                testResults: 'test-results.xml',
+                allowEmptyResults: true
+            )
+            archiveArtifacts(
+                artifacts: 'reports/**',
+                allowEmptyArchive: true
+            )
         }
     }
 }
