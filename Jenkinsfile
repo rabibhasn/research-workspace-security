@@ -28,6 +28,7 @@ pipeline {
             steps {
                 bat '"%VENV%\\Scripts\\python.exe" -m pip install -r requirements.txt'
                 bat '"%VENV%\\Scripts\\python.exe" -m pip install -e helper_package'
+                bat '"%VENV%\\Scripts\\python.exe" -m pip install pip-audit'
             }
         }
 
@@ -57,6 +58,31 @@ pipeline {
                 }
             }
         }
+
+
+
+        stage('Dependency Security Audit') {
+    steps {
+        script {
+            def auditStatus = bat(
+                returnStatus: true,
+                script: '"%VENV%\\Scripts\\python.exe" -m pip_audit -r requirements.txt --format json --output reports\\pip-audit.json'
+            )
+
+            if (auditStatus != 0) {
+                error('Dependency audit failed. Inspect the pip-audit report.')
+            }
+        }
+    }
+    post {
+        always {
+            archiveArtifacts(
+                artifacts: 'reports/pip-audit.json',
+                allowEmptyArchive: true
+            )
+        }
+    }
+}
 
         stage('Run Tests') {
             steps {
