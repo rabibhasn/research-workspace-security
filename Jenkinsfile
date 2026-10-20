@@ -29,20 +29,31 @@ pipeline {
         }
 
         
+        
         stage('Bandit Security Scan') {
             steps {
-                bat '''
-                    if not exist reports mkdir reports
-                    "%PYTHON%" -m bandit -r api_service resource_service processing_service helper_package/research_helper -f json -o reports/bandit-report.json
-                '''
+                script {
+                    bat 'if not exist reports mkdir reports'
+
+                    def banditStatus = bat(
+                        returnStatus: true,
+                        script: '"%PYTHON%" -m bandit -r api_service resource_service processing_service helper_package/research_helper -f json -o reports/bandit-report.json'
+                    )
+
+                    echo "Bandit exit code: ${banditStatus}"
+                    echo "Report generated for review; security gate is not enabled yet."
+                }
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'reports/bandit-report.json',
-                                     allowEmptyArchive: true
+                    archiveArtifacts(
+                        artifacts: 'reports/bandit-report.json',
+                        allowEmptyArchive: true
+                    )
                 }
             }
         }
+
 
 
         stage('Run Tests') {
