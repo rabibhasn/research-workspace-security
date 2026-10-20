@@ -7,3 +7,5 @@ __pycache__/
 .vs/
 obj/
 bin/
+# Generated Python package metadata
+*.egg-info/
