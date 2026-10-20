@@ -28,6 +28,23 @@ pipeline {
             }
         }
 
+        
+        stage('Bandit Security Scan') {
+            steps {
+                bat '''
+                    if not exist reports mkdir reports
+                    "%PYTHON%" -m bandit -r api_service resource_service processing_service helper_package/research_helper -f json -o reports/bandit-report.json
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/bandit-report.json',
+                                     allowEmptyArchive: true
+                }
+            }
+        }
+
+
         stage('Run Tests') {
             steps {
                 bat '"%PYTHON%" -m pytest -v'
