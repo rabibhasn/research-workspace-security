@@ -9,12 +9,14 @@ pipeline {
             }
         }
 
-        stage('Check Python') {
-            steps {
-                bat 'where py'
-                bat 'py --version'
-            }
+        
+    stage('Check Python') {
+        steps {
+            bat '"C:\\Users\\rabib\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe" --version'
+            bat '"C:\\Users\\rabib\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe" -c "import sys; print(sys.executable)"'
         }
+    }
+
 
         stage('Install Dependencies') {
             steps {
