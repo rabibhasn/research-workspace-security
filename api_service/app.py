@@ -1,26 +1,74 @@
 
 import os
 import secrets
-import requests
+import hmac
+import hashlib
+import json
 
+import requests
 from flask import Flask, jsonify, request
+
+if __package__:
+    from .database import (
+        get_user_by_username,
+        initialize_database,
+        verify_password,
+    )
+else:
+    from database import (
+        get_user_by_username,
+        initialize_database,
+        verify_password,
+    )
 
 app = Flask(__name__)
 
-# Demo users for local development.
-# We will improve credential handling and authentication later.
-USERS = {
-    "alice": {"password": "alice-demo-123", "role": "user"},
-    "bob": {"password": "bob-demo-123", "role": "user"},
-    "admin": {"password": "admin-demo-123", "role": "admin"},
-}
-
-# Keep track of tokens issued by this API process.
-# Each token maps to the user who logged in.
+# In-memory login tokens for this coursework prototype.
 active_tokens = {}
 
 RESOURCE_SERVICE_URL = "http://127.0.0.1:5001"
 PROCESSING_SERVICE_URL = "http://127.0.0.1:5002"
+
+
+def get_required_secret(name):
+    """Read a required secret without a hardcoded fallback."""
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"Set the {name} environment variable.")
+    return value
+
+
+def sign_user_context(user):
+    """Sign the authenticated user's ID and role."""
+    secret = get_required_secret("USER_CONTEXT_SECRET")
+
+    context_data = json.dumps(
+        {
+            "user_id": user["user_id"],
+            "role": user["role"],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    return hmac.new(
+        secret.encode("utf-8"),
+        context_data,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def resource_service_headers(user):
+    """Build authenticated headers for Resource Service requests."""
+    return {
+        "X-Service-Token": get_required_secret(
+            "RESOURCE_SERVICE_TOKEN"
+        ),
+        "X-User-Id": user["user_id"],
+        "X-User-Role": user["role"],
+        "X-User-Context-Signature": sign_user_context(user),
+    }
+
 
 @app.get("/health")
 def health():
@@ -40,27 +88,31 @@ def login():
     if not isinstance(username, str) or not isinstance(password, str):
         return jsonify({"error": "Invalid username or password"}), 401
 
-    user = USERS.get(username)
+    user = get_user_by_username(username)
 
-    if user is None or not secrets.compare_digest(
-        password, user["password"]
+    if user is None or not verify_password(
+        password,
+        user["password_salt"],
+        user["password_hash"],
     ):
         return jsonify({"error": "Invalid username or password"}), 401
 
     token = secrets.token_urlsafe(32)
+
     active_tokens[token] = {
-        "user_id": username,
+        "user_id": user["username"],
         "role": user["role"],
     }
 
     return jsonify({
         "token": token,
-        "user_id": username,
+        "user_id": user["username"],
         "role": user["role"],
     }), 200
 
 
 def get_current_user():
+    """Resolve a bearer token to its authenticated user."""
     authorization = request.headers.get("Authorization", "")
     scheme, separator, token = authorization.partition(" ")
 
@@ -68,6 +120,7 @@ def get_current_user():
         return None
 
     return active_tokens.get(token)
+
 
 @app.post("/records")
 def create_record():
@@ -84,22 +137,22 @@ def create_record():
     try:
         response = requests.post(
             f"{RESOURCE_SERVICE_URL}/internal/records",
-            headers={
-                "X-Service-Token": os.environ.get(
-                    "RESOURCE_SERVICE_TOKEN",
-                    "local-dev-secret-change-me",
-                ),
-                "X-User-Id": user["user_id"],
-                "X-User-Role": user["role"],
-            },
+            headers=resource_service_headers(user),
             json=data,
             timeout=5,
         )
+    except RuntimeError:
+        app.logger.exception("Service configuration is missing")
+        return jsonify({"error": "Service configuration error"}), 500
     except requests.RequestException:
         return jsonify({"error": "Resource Service unavailable"}), 502
 
-    return jsonify(response.json()), response.status_code
-
+    try:
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.JSONDecodeError:
+        return jsonify({
+            "error": "Invalid response from Resource Service"
+        }), 502
 
 
 @app.post("/records/<record_id>/process")
@@ -110,43 +163,59 @@ def process_record(record_id):
         return jsonify({"error": "Authentication required"}), 401
 
     try:
-        # Ask the Resource Service for this user's record.
+        # Verify that this user may access the requested record.
         record_response = requests.get(
             f"{RESOURCE_SERVICE_URL}/internal/records/{record_id}",
-            headers={
-                "X-Service-Token": os.environ.get(
-                    "RESOURCE_SERVICE_TOKEN",
-                    "local-dev-secret-change-me",
-                ),
-                "X-User-Id": user["user_id"],
-                "X-User-Role": user["role"],
-            },
+            headers=resource_service_headers(user),
             timeout=5,
         )
 
         if record_response.status_code != 200:
-            return jsonify(record_response.json()), record_response.status_code
+            try:
+                return (
+                    jsonify(record_response.json()),
+                    record_response.status_code,
+                )
+            except requests.exceptions.JSONDecodeError:
+                return jsonify({
+                    "error": "Invalid response from Resource Service"
+                }), 502
 
         record = record_response.json()["record"]
 
-        # Send the record's content to the Processing Service.
+        # Process content only after the access check succeeds.
         processing_response = requests.post(
             f"{PROCESSING_SERVICE_URL}/internal/process",
             headers={
-                "X-Service-Token": os.environ.get(
-                    "PROCESSING_SERVICE_TOKEN",
-                    "processing-local-secret-change-me",
+                "X-Service-Token": get_required_secret(
+                    "PROCESSING_SERVICE_TOKEN"
                 ),
             },
             json={"text": record["content"]},
             timeout=5,
         )
 
-        return jsonify(processing_response.json()), processing_response.status_code
+        try:
+            return (
+                jsonify(processing_response.json()),
+                processing_response.status_code,
+            )
+        except requests.exceptions.JSONDecodeError:
+            return jsonify({
+                "error": "Invalid response from Processing Service"
+            }), 502
 
-    except requests.RequestException:
-        return jsonify({"error": "A dependent service is unavailable"}), 502
+    except RuntimeError:
+        app.logger.exception("Service configuration is missing")
+        return jsonify({"error": "Service configuration error"}), 500
+    except (requests.RequestException, KeyError):
+        return jsonify({
+            "error": "A dependent service is unavailable"
+        }), 502
 
+
+# Ensure the SQLite users table exists when the API module is loaded.
+initialize_database()
 
 
 if __name__ == "__main__":

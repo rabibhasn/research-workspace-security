@@ -1,20 +1,38 @@
-
 import os
+import json
+import hmac
+import hashlib
 
-# Set the token before importing the Flask application.
 os.environ["RESOURCE_SERVICE_TOKEN"] = "test-resource-token"
+os.environ["USER_CONTEXT_SECRET"] = "test-user-context-secret"
 
 from resource_service.app import app, records
 
+SERVICE_HEADERS = {
+    "X-Service-Token": "test-resource-token",
+}
 
-SERVICE_HEADERS = {"X-Service-Token": "test-resource-token"}
+USER_CONTEXT_SECRET = "test-user-context-secret"
 
 
-def user_headers(user_id):
+def user_headers(user_id, role="user"):
+    context_data = json.dumps(
+        {"user_id": user_id, "role": role},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    signature = hmac.new(
+        USER_CONTEXT_SECRET.encode("utf-8"),
+        context_data,
+        hashlib.sha256,
+    ).hexdigest()
+
     return {
         **SERVICE_HEADERS,
         "X-User-Id": user_id,
-        "X-User-Role": "user",
+        "X-User-Role": role,
+        "X-User-Context-Signature": signature,
     }
 
 
@@ -44,8 +62,8 @@ def test_user_can_access_own_record():
         assert response.get_json()["record"]["owner_id"] == "alice"
 
 
-def test_vulnerability_user_can_access_another_users_record():
-    """VULNERABILITY: Bob can read Alice's record."""
+def test_user_cannot_access_another_users_record():
+    """Bob must not be able to read Alice's record."""
     records.clear()
 
     with app.test_client() as client:
@@ -66,9 +84,8 @@ def test_vulnerability_user_can_access_another_users_record():
             headers=user_headers("bob"),
         )
 
-        # This is the insecure behavior expected on vulnerable main.
-        assert response.status_code == 200
-        assert response.get_json()["record"]["owner_id"] == "alice"
+        assert response.status_code == 403
+        assert response.get_json()["error"] == "Forbidden"
 
 
 def test_request_without_service_token_is_rejected():
@@ -88,8 +105,8 @@ def test_request_without_service_token_is_rejected():
         assert response.get_json()["error"] == "Unauthorized service"
 
 
-def test_vulnerability_user_can_assign_record_to_another_owner():
-    """VULNERABILITY: Alice can assign a record to Bob."""
+def test_user_cannot_assign_record_to_another_owner():
+    """The server must assign ownership from the user context."""
     records.clear()
 
     with app.test_client() as client:
@@ -104,13 +121,11 @@ def test_vulnerability_user_can_assign_record_to_another_owner():
         )
 
         assert response.status_code == 201
-        assert response.get_json()["record"]["owner_id"] == "bob"
+        assert response.get_json()["record"]["owner_id"] == "alice"
 
 
-def test_vulnerability_internal_caller_can_claim_admin_role():
-    """VULNERABILITY: The service trusts the caller-supplied role."""
-    records.clear()
-
+def test_unsigned_caller_cannot_claim_admin_role():
+    """An unsigned caller must not be able to claim the admin role."""
     with app.test_client() as client:
         response = client.get(
             "/internal/admin/stats",
@@ -121,5 +136,4 @@ def test_vulnerability_internal_caller_can_claim_admin_role():
             },
         )
 
-        assert response.status_code == 200
-        assert "record_count" in response.get_json()
+    assert response.status_code == 401

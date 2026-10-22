@@ -1,42 +1,71 @@
 
 import os
 import uuid
+import json
+import hmac
+import hashlib
 
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# In-memory storage for this first prototype.
+# In-memory storage for this prototype.
 records = {}
 
-# Internal services must present this shared secret.
+# Both secrets must be configured outside the source code.
 SERVICE_TOKEN = os.environ.get("RESOURCE_SERVICE_TOKEN")
+USER_CONTEXT_SECRET = os.environ.get("USER_CONTEXT_SECRET")
 
 if not SERVICE_TOKEN:
     raise RuntimeError(
         "Set the RESOURCE_SERVICE_TOKEN environment variable."
     )
 
+if not USER_CONTEXT_SECRET:
+    raise RuntimeError(
+        "Set the USER_CONTEXT_SECRET environment variable."
+    )
+
 
 def internal_request_is_valid():
     """Check whether the caller has the internal service token."""
     supplied_token = request.headers.get("X-Service-Token", "")
-    return supplied_token == SERVICE_TOKEN
+    return hmac.compare_digest(supplied_token, SERVICE_TOKEN)
 
 
 def get_user_context():
-    """Read the user identity and role asserted by the trusted API."""
-    user_id = request.headers.get("X-User-Id")
-    role = request.headers.get("X-User-Role")
+    """Verify the identity and role signed by the API service."""
+    user_id = request.headers.get("X-User-Id", "")
+    role = request.headers.get("X-User-Role", "")
+    supplied_signature = request.headers.get(
+        "X-User-Context-Signature", ""
+    )
 
     if not user_id or role not in {"user", "admin"}:
+        return None
+
+    context_data = json.dumps(
+        {"user_id": user_id, "role": role},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    expected_signature = hmac.new(
+        USER_CONTEXT_SECRET.encode("utf-8"),
+        context_data,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(
+        supplied_signature, expected_signature
+    ):
         return None
 
     return {"user_id": user_id, "role": role}
 
 
 def require_internal_request():
-    """Reject requests that do not come from an authorized service."""
+    """Reject requests without the internal service token."""
     if not internal_request_is_valid():
         return jsonify({"error": "Unauthorized service"}), 401
 
@@ -76,12 +105,14 @@ def create_record():
 
     record_id = str(uuid.uuid4())
 
+    # Ownership is determined by the verified user context.
+    # A client cannot set owner_id in the JSON body.
     record = {
-    "id": record_id,
-    "owner_id": data.get("owner_id", context["user_id"]),
-    "title": title.strip(),
-    "content": content.strip(),
-}
+        "id": record_id,
+        "owner_id": context["user_id"],
+        "title": title.strip(),
+        "content": content.strip(),
+    }
 
     records[record_id] = record
 
@@ -124,8 +155,13 @@ def get_record(record_id):
     if record is None:
         return jsonify({"error": "Record not found"}), 404
 
-    # INTENTIONAL VULNERABILITY:
-    # The service does not check whether the requesting user owns the record.
+    # Admins may read any record; ordinary users may read only their own.
+    if (
+        context["role"] != "admin"
+        and record["owner_id"] != context["user_id"]
+    ):
+        return jsonify({"error": "Forbidden"}), 403
+
     return jsonify({"record": record}), 200
 
 
